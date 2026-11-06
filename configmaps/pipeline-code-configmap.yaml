@@ -1,0 +1,423 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipeline-code
+  labels:
+    project: csc581-pipeline
+# GENERATED from app/*.py  -- regenerate with scripts/make-configmap.sh after editing code
+data:
+  common.py: |
+    """Shared helpers for all pipeline services (Python standard library only)."""
+    import json
+    import os
+    import re
+    import sys
+    import time
+    import urllib.error
+    import urllib.request
+
+    SERVICE = os.environ.get("SERVICE_NAME", "service")
+    POD = os.environ.get("HOSTNAME", "unknown-pod")
+    UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+
+
+    def log(msg):
+        print(f"[{time.strftime('%Y-%m-%dT%H:%M:%S')}] [{SERVICE}] [{POD}] {msg}", flush=True)
+
+
+    def http(method, url, data=None, headers=None, timeout=10, retries=3):
+        """HTTP call with timeout and exponential-backoff retries.
+        Returns (status, body). 4xx responses are returned, not retried."""
+        last = None
+        for attempt in range(1, retries + 1):
+            try:
+                req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    return r.status, r.read()
+            except urllib.error.HTTPError as e:
+                if e.code < 500:
+                    return e.code, e.read()
+                last = f"HTTP {e.code}"
+            except Exception as e:  # connection refused, DNS failure, timeout...
+                last = repr(e)
+            log(f"retry {attempt}/{retries} for {method} {url}: {last}")
+            time.sleep(0.5 * (2 ** (attempt - 1)))
+        raise RuntimeError(f"{method} {url} failed after {retries} attempts: {last}")
+
+
+    def post_json(url, obj, timeout=30):
+        return http("POST", url, json.dumps(obj).encode(), {"Content-Type": "application/json"}, timeout=timeout)
+
+
+    def send(handler, code, body, ctype="application/json"):
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body, indent=2).encode()
+        elif isinstance(body, str):
+            body = body.encode()
+        handler.send_response(code)
+        handler.send_header("Content-Type", ctype)
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
+
+    def read_body(handler):
+        n = int(handler.headers.get("Content-Length", 0) or 0)
+        return handler.rfile.read(n) if n > 0 else b""
+
+
+    def quiet_health_logs(handler_cls):
+        """Suppress the noisy probe lines (/healthz) in container logs."""
+        def log_message(self, fmt, *args):
+            if "/healthz" not in self.path:
+                log(f"{self.address_string()} {fmt % args}")
+        handler_cls.log_message = log_message
+        return handler_cls
+
+
+    if __name__ == "__main__":
+        sys.exit("common.py is a library module")
+  inference.py: |
+    """inference: fetches the processed input from storage, runs detection, stores result JSON.
+    Every request is appended to /var/log/app/access.log, which the access-logger sidecar streams.
+
+    Milestone 2 note: detection is a placeholder (empty detections list) so the service wiring,
+    scaling and self-healing can be demonstrated. MobileNet-SSD (CPU, threshold >= 0.5) is planned
+    for Milestone 3. "served_by" shows which of the 3 replicas handled the request.
+
+      POST /infer {"id": "<uuid>"}
+      GET  /healthz
+    """
+    import json
+    import os
+    import sys
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from common import POD, UUID_RE, http, log, quiet_health_logs, read_body, send  # noqa: E402
+
+    PORT = int(os.environ.get("PORT", "8082"))
+    STORAGE = os.environ.get("STORAGE_URL", "http://storage-svc:8083")
+    ACCESS_LOG = os.environ.get("ACCESS_LOG", "/var/log/app/access.log")
+    THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.5"))
+
+
+    def access_log(image_id, status, latency_ms):
+        line = (f"{time.strftime('%Y-%m-%dT%H:%M:%S')} pod={POD} method=POST path=/infer "
+                f"id={image_id} status={status} latency_ms={latency_ms:.1f}\n")
+        try:
+            with open(ACCESS_LOG, "a") as fh:
+                fh.write(line)
+        except OSError as e:
+            log(f"cannot write access log: {e}")
+
+
+    @quiet_health_logs
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/healthz":
+                return send(self, 200, "ok", "text/plain")
+            send(self, 404, {"error": "not found"})
+
+        def do_POST(self):
+            if self.path != "/infer":
+                return send(self, 404, {"error": "not found"})
+            start = time.time()
+            image_id = ""
+            try:
+                image_id = json.loads(read_body(self) or b"{}").get("id", "")
+                if not UUID_RE.match(image_id):
+                    access_log(image_id, 400, 0)
+                    return send(self, 400, {"error": "id must be a UUIDv4"})
+                status, body = http("GET", f"{STORAGE}/objects/processed/{image_id}.json")
+                if status != 200:
+                    access_log(image_id, 404, (time.time() - start) * 1000)
+                    return send(self, 404, {"error": "processed input not found"})
+                tensor = json.loads(body)
+                latency = (time.time() - start) * 1000
+                result = {
+                    "id": image_id,
+                    "status": "completed",
+                    "model": "placeholder (MobileNet-SSD planned for Milestone 3)",
+                    "confidence_threshold": THRESHOLD,
+                    "detections": [],
+                    "input": tensor.get("source"),
+                    "preprocessed_by": tensor.get("preprocessed_by"),
+                    "served_by": POD,
+                    "inference_latency_ms": round(latency, 1),
+                    "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                http("PUT", f"{STORAGE}/objects/results/{image_id}.json", json.dumps(result).encode())
+                access_log(image_id, 200, latency)
+                log(f"inference done for {image_id} in {latency:.1f} ms")
+                send(self, 200, result)
+            except Exception as e:
+                access_log(image_id, 500, (time.time() - start) * 1000)
+                log(f"inference {image_id} failed: {e}")
+                send(self, 500, {"error": str(e)})
+
+
+    if __name__ == "__main__":
+        os.makedirs(os.path.dirname(ACCESS_LOG), exist_ok=True)
+        log(f"inference listening on :{PORT} (storage={STORAGE})")
+        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+  preprocessor.py: |
+    """preprocessor: fetches the raw image from storage, prepares the model input, stores it,
+    then invokes inference over HTTP.
+
+    Milestone 2 note: this stage reads the real image header (format, width, height, sha256)
+    and writes a tensor *descriptor* (target shape 300x300x3, normalization parameters).
+    The actual resize/normalize into a .npy tensor arrives with the real model in Milestone 3.
+
+      POST /preprocess {"id": "<uuid>"}
+      GET  /healthz
+    """
+    import hashlib
+    import json
+    import os
+    import sys
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from common import POD, UUID_RE, http, log, post_json, quiet_health_logs, read_body, send  # noqa: E402
+
+    PORT = int(os.environ.get("PORT", "8081"))
+    STORAGE = os.environ.get("STORAGE_URL", "http://storage-svc:8083")
+    INFERENCE = os.environ.get("INFERENCE_URL", "http://inference-svc:8082")
+    SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+
+
+    def image_info(b):
+        if b[:8] == b"\x89PNG\r\n\x1a\n":
+            return "png", int.from_bytes(b[16:20], "big"), int.from_bytes(b[20:24], "big")
+        if b[:3] == b"\xff\xd8\xff":
+            i = 2
+            while i < len(b) - 9:
+                if b[i] != 0xFF:
+                    i += 1
+                    continue
+                m = b[i + 1]
+                if m == 0xFF:
+                    i += 1
+                elif m in SOF:
+                    return "jpeg", int.from_bytes(b[i + 7:i + 9], "big"), int.from_bytes(b[i + 5:i + 7], "big")
+                elif m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:
+                    i += 2
+                else:
+                    i += 2 + int.from_bytes(b[i + 2:i + 4], "big")
+        return "unknown", None, None
+
+
+    @quiet_health_logs
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/healthz":
+                return send(self, 200, "ok", "text/plain")
+            send(self, 404, {"error": "not found"})
+
+        def do_POST(self):
+            if self.path != "/preprocess":
+                return send(self, 404, {"error": "not found"})
+            try:
+                image_id = json.loads(read_body(self) or b"{}").get("id", "")
+            except ValueError:
+                return send(self, 400, {"error": "invalid JSON"})
+            if not UUID_RE.match(image_id):
+                return send(self, 400, {"error": "id must be a UUIDv4"})
+            start = time.time()
+            try:
+                status, raw = http("GET", f"{STORAGE}/objects/raw/{image_id}")
+                if status != 200:
+                    return send(self, 404, {"error": f"raw image not found (storage returned {status})"})
+                fmt, w, h = image_info(raw)
+                tensor = {
+                    "id": image_id,
+                    "source": {"format": fmt, "width": w, "height": h, "bytes": len(raw),
+                               "sha256": hashlib.sha256(raw).hexdigest()},
+                    "target_shape": [300, 300, 3],
+                    "normalization": {"mean": 127.5, "scale": 1 / 127.5},
+                    "preprocessed_by": POD,
+                }
+                http("PUT", f"{STORAGE}/objects/processed/{image_id}.json", json.dumps(tensor).encode())
+                log(f"preprocessed {image_id}: {fmt} {w}x{h} in {(time.time() - start) * 1000:.1f} ms -> invoking inference")
+                status, body = post_json(f"{INFERENCE}/infer", {"id": image_id}, timeout=30)
+                return send(self, status, body)
+            except Exception as e:
+                log(f"preprocess {image_id} failed: {e}")
+                return send(self, 502, {"error": str(e)})
+
+
+    if __name__ == "__main__":
+        log(f"preprocessor listening on :{PORT} (storage={STORAGE}, inference={INFERENCE})")
+        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+  storage.py: |
+    """storage service: simple object store over an emptyDir volume (NON-persistent in Milestone 2).
+
+      PUT /objects/<raw|processed|results>/<name>   store bytes
+      GET /objects/<raw|processed|results>/<name>   fetch bytes (404 if missing)
+      GET /stats                                    count objects per folder
+      GET /healthz                                  probe endpoint
+    """
+    import os
+    import re
+    import sys
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from common import log, quiet_health_logs, read_body, send  # noqa: E402
+
+    DATA = os.environ.get("DATA_DIR", "/data")
+    PORT = int(os.environ.get("PORT", "8083"))
+    SAFE = re.compile(r"^(raw|processed|results)/[A-Za-z0-9._-]+$")
+
+
+    @quiet_health_logs
+    class Handler(BaseHTTPRequestHandler):
+        def _file(self):
+            p = self.path.split("?")[0]
+            if not p.startswith("/objects/"):
+                return None
+            rel = p[len("/objects/"):]
+            return os.path.join(DATA, rel) if SAFE.match(rel) else None
+
+        def do_GET(self):
+            if self.path == "/healthz":
+                return send(self, 200, "ok", "text/plain")
+            if self.path == "/stats":
+                stats = {d: len(os.listdir(os.path.join(DATA, d))) if os.path.isdir(os.path.join(DATA, d)) else 0
+                         for d in ("raw", "processed", "results")}
+                return send(self, 200, stats)
+            f = self._file()
+            if not f:
+                return send(self, 400, {"error": "invalid object path"})
+            if not os.path.exists(f):
+                return send(self, 404, {"error": "not found"})
+            with open(f, "rb") as fh:
+                send(self, 200, fh.read(), "application/octet-stream")
+
+        def do_PUT(self):
+            f = self._file()
+            if not f:
+                return send(self, 400, {"error": "invalid object path"})
+            body = read_body(self)
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            tmp = f + ".tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(body)
+            os.replace(tmp, f)  # atomic: readers never see half-written files
+            send(self, 201, {"stored": os.path.relpath(f, DATA), "bytes": len(body)})
+
+
+    if __name__ == "__main__":
+        for d in ("raw", "processed", "results"):
+            os.makedirs(os.path.join(DATA, d), exist_ok=True)
+        log(f"storage listening on :{PORT}, data dir {DATA}")
+        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+  upload_api.py: |
+    """upload-api: the only externally exposed service (NodePort 30080).
+
+      POST /images              upload an image (multipart field "image", or raw body)
+                                -> 202 Accepted {"id": <uuid4>, ...}
+      GET  /images/<id>/result  -> 200 with detection JSON, 202 while processing,
+                                   404 unknown id, 500 if the pipeline failed
+      GET  /healthz             probe endpoint
+    """
+    import json
+    import os
+    import sys
+    import threading
+    import uuid
+    from email.parser import BytesParser
+    from email.policy import default as email_policy
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from common import UUID_RE, http, log, post_json, quiet_health_logs, read_body, send  # noqa: E402
+
+    PORT = int(os.environ.get("PORT", "8080"))
+    STORAGE = os.environ.get("STORAGE_URL", "http://storage-svc:8083")
+    PREPROCESSOR = os.environ.get("PREPROCESSOR_URL", "http://preprocessor-svc:8081")
+    MAX_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+
+
+    def extract_image(ctype, body):
+        """Return image bytes from a multipart/form-data or raw upload."""
+        if ctype.startswith("multipart/form-data"):
+            msg = BytesParser(policy=email_policy).parsebytes(
+                b"MIME-Version: 1.0\r\nContent-Type: " + ctype.encode() + b"\r\n\r\n" + body)
+            for part in msg.iter_parts():
+                if part.get_param("name", header="content-disposition") == "image" or part.get_filename():
+                    return part.get_payload(decode=True) or b""
+            return b""
+        return body
+
+
+    def is_image(b):
+        return b[:3] == b"\xff\xd8\xff" or b[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+    def run_pipeline(image_id):
+        """Runs in a background thread so the client gets 202 immediately."""
+        try:
+            status, body = post_json(f"{PREPROCESSOR}/preprocess", {"id": image_id}, timeout=60)
+            log(f"pipeline for {image_id} finished: preprocessor returned {status}")
+            if status >= 400:
+                raise RuntimeError(f"preprocessor returned {status}: {body[:200]!r}")
+        except Exception as e:
+            log(f"pipeline for {image_id} FAILED: {e}")
+            err = json.dumps({"id": image_id, "status": "failed", "error": str(e)}).encode()
+            try:
+                http("PUT", f"{STORAGE}/objects/results/{image_id}.error.json", err)
+            except Exception as e2:
+                log(f"could not record error for {image_id}: {e2}")
+
+
+    @quiet_health_logs
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/healthz":
+                return send(self, 200, "ok", "text/plain")
+            parts = self.path.strip("/").split("/")
+            if len(parts) == 3 and parts[0] == "images" and parts[2] == "result":
+                image_id = parts[1]
+                if not UUID_RE.match(image_id):
+                    return send(self, 400, {"error": "id must be a UUIDv4"})
+                status, body = http("GET", f"{STORAGE}/objects/results/{image_id}.json")
+                if status == 200:
+                    return send(self, 200, body)
+                status, body = http("GET", f"{STORAGE}/objects/results/{image_id}.error.json")
+                if status == 200:
+                    return send(self, 500, body)
+                status, _ = http("GET", f"{STORAGE}/objects/raw/{image_id}")
+                if status == 200:
+                    return send(self, 202, {"id": image_id, "status": "processing"})
+                return send(self, 404, {"error": "unknown id"})
+            send(self, 404, {"error": "not found"})
+
+        def do_POST(self):
+            if self.path.split("?")[0] != "/images":
+                return send(self, 404, {"error": "not found"})
+            body = read_body(self)
+            if len(body) > MAX_BYTES:
+                return send(self, 413, {"error": f"upload larger than {MAX_BYTES} bytes"})
+            image = extract_image(self.headers.get("Content-Type", ""), body)
+            if not image or not is_image(image):
+                return send(self, 400, {"error": "upload a JPEG or PNG (multipart field 'image' or raw body)"})
+            image_id = str(uuid.uuid4())
+            try:
+                status, _ = http("PUT", f"{STORAGE}/objects/raw/{image_id}", image)
+                if status >= 400:
+                    raise RuntimeError(f"storage returned {status}")
+            except Exception as e:
+                log(f"could not store {image_id}: {e}")
+                return send(self, 503, {"error": "storage unavailable", "detail": str(e)})
+            log(f"accepted {image_id} ({len(image)} bytes), invoking preprocessor")
+            threading.Thread(target=run_pipeline, args=(image_id,), daemon=True).start()
+            send(self, 202, {"id": image_id, "status": "accepted", "result_url": f"/images/{image_id}/result"})
+
+
+    if __name__ == "__main__":
+        log(f"upload-api listening on :{PORT} (storage={STORAGE}, preprocessor={PREPROCESSOR})")
+        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

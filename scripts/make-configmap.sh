@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Regenerate configmaps/pipeline-code-configmap.yaml from app/*.py (run after editing code),
+# then apply it and restart the Deployments so the Pods load the new code.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+kubectl create configmap pipeline-code --from-file=app/ --dry-run=client -o yaml \
+  > configmaps/pipeline-code-configmap.yaml
+kubectl apply -f configmaps/
+kubectl rollout restart deployment upload-api preprocessor inference storage

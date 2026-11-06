@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upload-api
+  labels:
+    app: upload-api
+    project: csc581-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: upload-api
+  template:
+    metadata:
+      labels:
+        app: upload-api
+        project: csc581-pipeline
+    spec:
+      containers:
+        - name: upload-api
+          image: python:3.11-slim
+          command: ["python", "-u", "/app/upload_api.py"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SERVICE_NAME
+              value: upload-api
+            - name: PORT
+              value: "8080"
+            - name: STORAGE_URL
+              value: http://storage-svc:8083
+            - name: PREPROCESSOR_URL
+              value: http://preprocessor-svc:8081
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: app-code
+          configMap:
+            name: pipeline-code

@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preprocessor
+  labels:
+    app: preprocessor
+    project: csc581-pipeline
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: preprocessor
+  template:
+    metadata:
+      labels:
+        app: preprocessor
+        project: csc581-pipeline
+    spec:
+      containers:
+        - name: preprocessor
+          image: python:3.11-slim
+          command: ["python", "-u", "/app/preprocessor.py"]
+          ports:
+            - containerPort: 8081
+          env:
+            - name: SERVICE_NAME
+              value: preprocessor
+            - name: PORT
+              value: "8081"
+            - name: STORAGE_URL
+              value: http://storage-svc:8083
+            - name: INFERENCE_URL
+              value: http://inference-svc:8082
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: app-code
+          configMap:
+            name: pipeline-code

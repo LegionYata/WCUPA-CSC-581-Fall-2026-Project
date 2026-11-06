@@ -1,0 +1,25 @@
+all:
+  vars:
+    ansible_become: true
+    ansible_ssh_private_key_file: "/home/fabric/.ssh/slice_key"
+    ansible_ssh_common_args: "-F /home/fabric/work/fabric_config/ssh_config"
+    rke2_token: "fabric-rke2-cluster-token"
+    rke2_server_private_ip: "192.168.1.1"
+
+  children:
+    rke2_servers:
+      hosts:
+        node1:
+          ansible_host: "192.5.67.111"
+          ansible_user: "ubuntu"
+          ansible_python_interpreter: "/usr/bin/python3"
+          private_ip: "192.168.1.1"
+
+    rke2_agents:
+      hosts:
+        node2:
+          ansible_host: "192.5.67.47"
+          ansible_user: "ubuntu"
+          ansible_python_interpreter: "/usr/bin/python3"
+          private_ip: "192.168.1.2"
+

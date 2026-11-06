@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference
+  labels:
+    app: inference
+    project: csc581-pipeline
+spec:
+  replicas: 3            # Milestone 2 requirement: >= 3 replicas
+  selector:
+    matchLabels:
+      app: inference
+  template:
+    metadata:
+      labels:
+        app: inference
+        project: csc581-pipeline
+    spec:
+      containers:
+        # ---- main container ----
+        - name: inference
+          image: python:3.11-slim
+          command: ["python", "-u", "/app/inference.py"]
+          ports:
+            - containerPort: 8082
+          env:
+            - name: SERVICE_NAME
+              value: inference
+            - name: PORT
+              value: "8082"
+            - name: STORAGE_URL
+              value: http://storage-svc:8083
+            - name: ACCESS_LOG
+              value: /var/log/app/access.log
+            - name: CONFIDENCE_THRESHOLD
+              value: "0.5"
+          volumeMounts:
+            - name: app-code
+              mountPath: /app
+              readOnly: true
+            - name: logs
+              mountPath: /var/log/app
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8082 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8082 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+        # ---- sidecar: access logger ----
+        - name: access-logger
+          image: busybox:1.36
+          command: ["sh", "-c", "touch /var/log/app/access.log && tail -n +1 -F /var/log/app/access.log"]
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log/app
+              readOnly: false
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+      volumes:
+        - name: app-code
+          configMap:
+            name: pipeline-code
+        - name: logs
+          emptyDir: {}     # shared between the inference container and the sidecar
