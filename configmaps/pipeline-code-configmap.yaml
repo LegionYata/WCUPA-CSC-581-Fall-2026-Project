@@ -4,10 +4,9 @@ metadata:
   name: pipeline-code
   labels:
     project: csc581-pipeline
-# GENERATED from app/*.py  -- regenerate with scripts/make-configmap.sh after editing code
 data:
   common.py: |
-    """Shared helpers for all pipeline services (Python standard library only)."""
+    """Shared helpers for all pipeline services."""
     import json
     import os
     import re
@@ -80,13 +79,6 @@ data:
   inference.py: |
     """inference: fetches the processed input from storage, runs detection, stores result JSON.
     Every request is appended to /var/log/app/access.log, which the access-logger sidecar streams.
-
-    Milestone 2 note: detection is a placeholder (empty detections list) so the service wiring,
-    scaling and self-healing can be demonstrated. MobileNet-SSD (CPU, threshold >= 0.5) is planned
-    for Milestone 3. "served_by" shows which of the 3 replicas handled the request.
-
-      POST /infer {"id": "<uuid>"}
-      GET  /healthz
     """
     import json
     import os
@@ -165,13 +157,6 @@ data:
   preprocessor.py: |
     """preprocessor: fetches the raw image from storage, prepares the model input, stores it,
     then invokes inference over HTTP.
-
-    Milestone 2 note: this stage reads the real image header (format, width, height, sha256)
-    and writes a tensor *descriptor* (target shape 300x300x3, normalization parameters).
-    The actual resize/normalize into a .npy tensor arrives with the real model in Milestone 3.
-
-      POST /preprocess {"id": "<uuid>"}
-      GET  /healthz
     """
     import hashlib
     import json
@@ -253,12 +238,7 @@ data:
         log(f"preprocessor listening on :{PORT} (storage={STORAGE}, inference={INFERENCE})")
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
   storage.py: |
-    """storage service: simple object store over an emptyDir volume (NON-persistent in Milestone 2).
-
-      PUT /objects/<raw|processed|results>/<name>   store bytes
-      GET /objects/<raw|processed|results>/<name>   fetch bytes (404 if missing)
-      GET /stats                                    count objects per folder
-      GET /healthz                                  probe endpoint
+    """storage service: simple object store over an emptyDir volume.
     """
     import os
     import re
@@ -317,12 +297,6 @@ data:
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
   upload_api.py: |
     """upload-api: the only externally exposed service (NodePort 30080).
-
-      POST /images              upload an image (multipart field "image", or raw body)
-                                -> 202 Accepted {"id": <uuid4>, ...}
-      GET  /images/<id>/result  -> 200 with detection JSON, 202 while processing,
-                                   404 unknown id, 500 if the pipeline failed
-      GET  /healthz             probe endpoint
     """
     import json
     import os
