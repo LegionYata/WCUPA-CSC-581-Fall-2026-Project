@@ -1,0 +1,128 @@
+---
+# ============================================================
+# NFS Server
+# node1 / 192.168.1.1
+# ============================================================
+
+- name: Configure NFS server
+  hosts: node1
+  become: true
+
+  tasks:
+
+    - name: Install NFS server
+      ansible.builtin.apt:
+        name:
+          - nfs-kernel-server
+          - nfs-common
+        state: present
+        update_cache: true
+
+    - name: Create shared data directory
+      ansible.builtin.file:
+        path: /opt/data
+        state: directory
+        owner: root
+        group: root
+        mode: "0777"
+
+    - name: Create NFS exports directory
+      ansible.builtin.file:
+        path: /etc/exports.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Configure NFS export
+      ansible.builtin.copy:
+        dest: /etc/exports.d/rke2-data.exports
+        content: |
+          /opt/data 192.168.1.0/24(rw,sync,no_subtree_check)
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - Reload NFS exports
+
+    - name: Enable and start NFS server
+      ansible.builtin.systemd:
+        name: nfs-kernel-server
+        enabled: true
+        state: started
+
+    - name: Apply NFS exports immediately
+      ansible.builtin.command:
+        cmd: exportfs -ra
+      changed_when: false
+
+    - name: Show active NFS exports
+      ansible.builtin.command:
+        cmd: exportfs -v
+      register: nfs_exports
+      changed_when: false
+
+    - name: Display active NFS exports
+      ansible.builtin.debug:
+        var: nfs_exports.stdout_lines
+
+  handlers:
+
+    - name: Reload NFS exports
+      ansible.builtin.command:
+        cmd: exportfs -ra
+
+
+# ============================================================
+# NFS Clients
+# node2, node3, ...
+# ============================================================
+
+- name: Configure NFS clients
+  hosts: "all:!node1"
+  become: true
+
+  tasks:
+
+    - name: Install NFS client
+      ansible.builtin.apt:
+        name: nfs-common
+        state: present
+        update_cache: true
+
+    - name: Create NFS mount point
+      ansible.builtin.file:
+        path: /opt/data
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Add NFS mount to fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: '^192\.168\.1\.1:/opt/data\s+/opt/data\s+'
+        line: "192.168.1.1:/opt/data /opt/data nfs defaults,_netdev 0 0"
+        state: present
+
+    - name: Check whether /opt/data is already mounted
+      ansible.builtin.command:
+        cmd: mountpoint -q /opt/data
+      register: nfs_mountpoint
+      changed_when: false
+      failed_when: false
+
+    - name: Mount NFS filesystem
+      ansible.builtin.command:
+        cmd: mount /opt/data
+      when: nfs_mountpoint.rc != 0
+
+    - name: Verify NFS mount
+      ansible.builtin.command:
+        cmd: findmnt /opt/data
+      register: nfs_mount
+      changed_when: false
+
+    - name: Display NFS mount
+      ansible.builtin.debug:
+        var: nfs_mount.stdout_lines

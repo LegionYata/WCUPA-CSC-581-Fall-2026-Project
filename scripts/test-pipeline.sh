@@ -1,7 +1,3 @@
-#!/usr/bin/env bash
-# End-to-end test: upload -> preprocessing -> inference -> storage -> poll result.
-# Usage: ./scripts/test-pipeline.sh [image-file] [base-url]
-#   image-file defaults to a generated 1x1 PNG; base-url defaults to http://localhost:30080
 set -euo pipefail
 IMG="${1:-}"
 BASE="${2:-http://localhost:30080}"

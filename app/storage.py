@@ -1,9 +1,4 @@
-"""storage service: simple object store over an emptyDir volume (NON-persistent in Milestone 2).
-
-  PUT /objects/<raw|processed|results>/<name>   store bytes
-  GET /objects/<raw|processed|results>/<name>   fetch bytes (404 if missing)
-  GET /stats                                    count objects per folder
-  GET /healthz                                  probe endpoint
+"""storage service: simple object store over an emptyDir volume.
 """
 import os
 import re

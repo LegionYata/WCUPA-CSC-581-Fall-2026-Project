@@ -1,10 +1,4 @@
-"""upload-api: the only externally exposed service (NodePort 30080).
-
-  POST /images              upload an image (multipart field "image", or raw body)
-                            -> 202 Accepted {"id": <uuid4>, ...}
-  GET  /images/<id>/result  -> 200 with detection JSON, 202 while processing,
-                               404 unknown id, 500 if the pipeline failed
-  GET  /healthz             probe endpoint
+"""upload-api: the only externally exposed service .
 """
 import json
 import os

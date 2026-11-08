@@ -1,4 +1,3 @@
-"""Shared helpers for all pipeline services (Python standard library only)."""
 import json
 import os
 import re

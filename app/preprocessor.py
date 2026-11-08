@@ -1,12 +1,5 @@
 """preprocessor: fetches the raw image from storage, prepares the model input, stores it,
 then invokes inference over HTTP.
-
-Milestone 2 note: this stage reads the real image header (format, width, height, sha256)
-and writes a tensor *descriptor* (target shape 300x300x3, normalization parameters).
-The actual resize/normalize into a .npy tensor arrives with the real model in Milestone 3.
-
-  POST /preprocess {"id": "<uuid>"}
-  GET  /healthz
 """
 import hashlib
 import json

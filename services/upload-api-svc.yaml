@@ -13,4 +13,4 @@ spec:
     - name: http
       port: 80
       targetPort: 8080
-      nodePort: 30080   # external entry point: http://<node-ip>:30080
+      nodePort: 30080

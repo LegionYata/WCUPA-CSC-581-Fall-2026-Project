@@ -1,12 +1,5 @@
 """inference: fetches the processed input from storage, runs detection, stores result JSON.
 Every request is appended to /var/log/app/access.log, which the access-logger sidecar streams.
-
-Milestone 2 note: detection is a placeholder (empty detections list) so the service wiring,
-scaling and self-healing can be demonstrated. MobileNet-SSD (CPU, threshold >= 0.5) is planned
-for Milestone 3. "served_by" shows which of the 3 replicas handled the request.
-
-  POST /infer {"id": "<uuid>"}
-  GET  /healthz
 """
 import json
 import os

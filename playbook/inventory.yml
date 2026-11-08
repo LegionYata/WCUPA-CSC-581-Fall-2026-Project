@@ -5,12 +5,13 @@ all:
     ansible_ssh_common_args: "-F /home/fabric/work/fabric_config/ssh_config"
     rke2_token: "fabric-rke2-cluster-token"
     rke2_server_private_ip: "192.168.1.1"
+    dataplane_gateway: "192.168.1.254"
 
   children:
     rke2_servers:
       hosts:
         node1:
-          ansible_host: "192.5.67.111"
+          ansible_host: "2610:e0:a04c:fab2:f816:3eff:fedd:fac8"
           ansible_user: "ubuntu"
           ansible_python_interpreter: "/usr/bin/python3"
           private_ip: "192.168.1.1"
@@ -18,8 +19,13 @@ all:
     rke2_agents:
       hosts:
         node2:
-          ansible_host: "192.5.67.47"
+          ansible_host: "2610:e0:a04c:fab2:f816:3eff:fe25:9e27"
           ansible_user: "ubuntu"
           ansible_python_interpreter: "/usr/bin/python3"
           private_ip: "192.168.1.2"
+        node3:
+          ansible_host: "2610:e0:a04c:fab2:f816:3eff:feda:3f68"
+          ansible_user: "ubuntu"
+          ansible_python_interpreter: "/usr/bin/python3"
+          private_ip: "192.168.1.3"
 

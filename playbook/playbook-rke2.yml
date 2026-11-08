@@ -6,6 +6,71 @@
 # FABRIC-specific: management NICs are often IPv6-only and own the default
 # route. Canal/Flannel picks that iface when flannel.iface is unset, leaving
 # nodes NotReady. We pin Flannel/Calico to the dataplane via can-reach.
+# FABRIC-specific networking preparation.
+#
+# Calico pods use 169.254.1.1 as their virtual default gateway and rely on
+# proxy ARP on the host-side cali* interface. Some FABRIC sites (for example
+# NEWY) have no host route covering 169.254.1.1, which prevents Linux from
+# answering the proxy-ARP request.
+#
+# FABRIC does provide a route to its metadata address 169.254.169.254.
+# Use that route to discover the site-specific management gateway/interface
+# and always install an explicit /32 route for Calico's virtual gateway.
+
+- name: Prepare FABRIC host networking for RKE2
+  hosts: all
+  become: true
+  tasks:
+
+    - name: Discover FABRIC management route
+      ansible.builtin.command:
+        cmd: ip -4 route get 169.254.169.254
+      register: fabric_metadata_route
+      changed_when: false
+      failed_when: fabric_metadata_route.rc != 0
+
+    - name: Install explicit Calico virtual-gateway route
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        ROUTE={{ fabric_metadata_route.stdout | quote }}
+
+        GATEWAY=$(echo "$ROUTE" | awk '{
+          for (i=1; i<=NF; i++)
+            if ($i == "via") {
+              print $(i+1)
+              exit
+            }
+        }')
+
+        DEVICE=$(echo "$ROUTE" | awk '{
+          for (i=1; i<=NF; i++)
+            if ($i == "dev") {
+              print $(i+1)
+              exit
+            }
+        }')
+
+        test -n "$DEVICE"
+
+        if [[ -n "$GATEWAY" ]]; then
+          ip route replace 169.254.1.1/32 via "$GATEWAY" dev "$DEVICE"
+        else
+          ip route replace 169.254.1.1/32 dev "$DEVICE" scope link
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Verify explicit Calico virtual-gateway route
+      ansible.builtin.command:
+        cmd: ip route get 169.254.1.1
+      register: calico_gateway_route
+      changed_when: false
+
+    - name: Show Calico virtual-gateway route
+      ansible.builtin.debug:
+        var: calico_gateway_route.stdout_lines
 
 - name: Bootstrap RKE2 server (control plane)
   hosts: rke2_servers
@@ -42,10 +107,16 @@
             - "127.0.0.1"
 
     - name: Install RKE2 server
-      ansible.builtin.shell: curl -sfL https://get.rke2.io | sh -
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -sfL --retry 5 --retry-delay 5 https://get.rke2.io | sh -
       args:
         creates: /usr/local/bin/rke2
         executable: /bin/bash
+      register: _rke2_install
+      until: _rke2_install is succeeded
+      retries: 3
+      delay: 10
 
     - name: Ensure server manifests directory exists
       ansible.builtin.file:
@@ -74,9 +145,9 @@
                   - "--kube-subnet-mgr"
                   - "--iptables-forward-rules=false"
                   - "--ip-blackhole-route"
-                  - "--iface-can-reach={{ rke2_server_private_ip }}"
+                  - "--iface-can-reach=192.168.1.254"
               calico:
-                ipAutoDetectionMethod: "can-reach={{ rke2_server_private_ip }}"
+                ipAutoDetectionMethod: "can-reach=192.168.1.254"
 
     - name: Enable and start rke2-server
       ansible.builtin.systemd:
@@ -152,12 +223,18 @@
           node-ip: "{{ private_ip }}"
 
     - name: Install RKE2 agent
-      ansible.builtin.shell: curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="agent" sh -
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -sfL --retry 5 --retry-delay 5 https://get.rke2.io | INSTALL_RKE2_TYPE="agent" sh -
       args:
         creates: /usr/local/bin/rke2
         executable: /bin/bash
       environment:
         INSTALL_RKE2_TYPE: agent
+      register: _rke2_agent_install
+      until: _rke2_agent_install is succeeded
+      retries: 3
+      delay: 10
 
     - name: Enable and start rke2-agent
       ansible.builtin.systemd:
@@ -167,7 +244,7 @@
         daemon_reload: true
 
 
-- name: Patch Canal for FABRIC and verify cluster
+- name: Verify RKE2 cluster
   hosts: rke2_servers
   become: true
   tasks:
@@ -175,48 +252,25 @@
       ansible.builtin.command: >
         /var/lib/rancher/rke2/bin/kubectl
         --kubeconfig /etc/rancher/rke2/rke2.yaml
-        -n kube-system get daemonset rke2-canal
+        -n kube-system
+        get daemonset rke2-canal
       register: canal_ds
-      retries: 36
-      delay: 10
+      retries: 18
+      delay: 5
       until: canal_ds.rc == 0
       changed_when: false
-
-    # Same pattern as fabric_examples/.../k8s_flannel.sh: Flannel may still try
-    # the IPv6 management path for the API; force IPv4 dataplane API access.
-    - name: Patch Canal pods to reach API over dataplane IPv4
-      ansible.builtin.shell: |
-        set -euo pipefail
-        K=/var/lib/rancher/rke2/bin/kubectl
-        KC=/etc/rancher/rke2/rke2.yaml
-        API_IP="{{ rke2_server_private_ip }}"
-
-        $K --kubeconfig "$KC" -n kube-system set env daemonset/rke2-canal \
-          KUBERNETES_SERVICE_HOST="$API_IP" \
-          KUBERNETES_SERVICE_PORT=6443
-
-        # Ensure flannel container args include iface-can-reach (idempotent).
-        $K --kubeconfig "$KC" -n kube-system get daemonset rke2-canal -o json \
-          | python3 -c '
-        import json, sys
-        api_ip = sys.argv[1]
-        ds = json.load(sys.stdin)
-        want = f"--iface-can-reach={api_ip}"
-        for c in ds["spec"]["template"]["spec"]["containers"]:
-            if c["name"] != "flannel":
-                continue
-            args = c.get("args") or []
-            args = [a for a in args if not a.startswith("--iface-can-reach=")]
-            args.append(want)
-            c["args"] = args
-        json.dump(ds, sys.stdout)
-        ' "$API_IP" | $K --kubeconfig "$KC" apply -f -
-
-        $K --kubeconfig "$KC" -n kube-system rollout restart daemonset/rke2-canal
-        $K --kubeconfig "$KC" -n kube-system rollout status daemonset/rke2-canal --timeout=300s
-      args:
-        executable: /bin/bash
-
+      
+    - name: Force Canal API access over FABRIC dataplane
+      ansible.builtin.command: >
+        /var/lib/rancher/rke2/bin/kubectl
+        --kubeconfig /etc/rancher/rke2/rke2.yaml
+        -n kube-system
+        set env daemonset/rke2-canal
+        KUBERNETES_SERVICE_HOST={{ rke2_server_private_ip }}
+        KUBERNETES_SERVICE_PORT=6443
+      register: canal_api_env
+      changed_when: "'updated' in canal_api_env.stdout"
+      
     - name: Wait until both nodes are Ready
       ansible.builtin.shell: |
         count=$(/var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml get nodes --no-headers 2>/dev/null | grep -c ' Ready' || true)
@@ -239,7 +293,7 @@
       ansible.builtin.debug:
         var: nodes_out.stdout_lines
 
-    - name: Show system pods (CNI / CoreDNS)
+    - name: Show system pods
       ansible.builtin.command: >
         /var/lib/rancher/rke2/bin/kubectl
         --kubeconfig /etc/rancher/rke2/rke2.yaml
@@ -308,3 +362,13 @@
     - name: Print demo workload status
       ansible.builtin.debug:
         var: demo_out.stdout_lines
+
+    - name: Show expected 200 returned value for curl
+      ansible.builtin.shell: |
+        curl -s -o /dev/null -w '%{http_code}\n' http://192.168.1.1:30080/
+      register: curl_out
+      changed_when: false
+
+    - name: Print curl status
+      ansible.builtin.debug:
+        var: curl_out.stdout_lines
