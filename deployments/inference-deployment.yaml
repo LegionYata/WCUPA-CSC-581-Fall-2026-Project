@@ -6,7 +6,7 @@ metadata:
     app: inference
     project: csc581-pipeline
 spec:
-  replicas: 3            # Milestone 2 requirement: >= 3 replicas
+  replicas: 3
   selector:
     matchLabels:
       app: inference
