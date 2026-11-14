@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Batch processing: send every image in a folder through the pipeline
 #   defaults: images/  results/  http://localhost:30080
-# Output: <output-dir>/<name>.json per image (or <name>.error.txt on failure) + <output-dir>/summary.csv
 # Note: upload-api accepts JPEG and PNG only; other formats are recorded as failures.
 set -euo pipefail
 IN="${1:-images}"
