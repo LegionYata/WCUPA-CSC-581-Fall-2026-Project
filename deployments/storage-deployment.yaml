@@ -6,7 +6,7 @@ metadata:
     app: storage
     project: csc581-pipeline
 spec:
-  replicas: 1   # single replica: emptyDir is per-Pod, so data is NOT shared or persistent (PVC in Milestone 3)
+  replicas: 1   # single replica: emptyDir is per-Pod, so data is NOT shared or persistent
   strategy:
     type: Recreate
   selector:
