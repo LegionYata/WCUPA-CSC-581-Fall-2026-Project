@@ -71,8 +71,10 @@ kubectl delete pod <one-inference-pod-name>
 kubectl get pods -l app=inference -w
 kubectl get deploy inference
 ```
-
+### Evidence 1:
 <img src="evidence/evidence1.png" width="650">
+
+### Evidence 2 (Self Healing):
 <img src="evidence/evidence2_self_healing.png" width="650">
 
 ## Sidecar rationale
