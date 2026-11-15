@@ -1,6 +1,6 @@
 # CSC 581 Project – Core Implementation
 
-This project introduces a Kubernetes image-detection pipeline running on an RKE2 cluster (FABRIC testbed, provisioned with `rke2(cluster).ipynb`).
+This project introduces a Kubernetes object-detection pipeline running on an RKE2 cluster (FABRIC testbed, provisioned with `rke2(cluster).ipynb`).
  **There is no persistence yet**: storage uses `emptyDir`.
 
 ## Architecture
