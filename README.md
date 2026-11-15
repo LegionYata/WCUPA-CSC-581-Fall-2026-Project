@@ -72,9 +72,8 @@ kubectl get pods -l app=inference -w
 kubectl get deploy inference
 ```
 
-```
-Insert the evidence Image here
-```
+<img src="evidence/evidence1.png" width="650">
+<img src="evidence/evidence2_self_healing.png" width="650">
 
 ## Sidecar rationale
 Each inference Pod runs an access-logger sidecar (busybox) next to the inference container. The two containers share an emptyDir volume: inference appends one line for every request. The sidecar streams that file to stdout so you can read it with `kubectl logs <pod> -c access-logger`. The request logging stays separate from the inference code. You can also replace or upgrade the logger such as a metrics exporter, without changing or restarting the model container. On which the logs show any of the three replicas served each request.
